@@ -1,0 +1,133 @@
+# Анализ условий: 
+
+# 1) Развертка подов 
+# У нас имеется три зоны кластера
+# (например три различных ЦОДа),
+# а так же 5ть worker нод(арендованные машины). 
+# Для обеспечения отказоустойчивости поды 
+# нужно развернуть в каждой зоне кластера.
+# Используем preferredDuringSchedulingIgnoredDuringExecution 
+# в блоке антиаффинити для распространения подов 
+# по нескольким зонам облачных провайдеров.
+# Можно развернуть Deployment на все пять узлов,
+# но тогда получим высокое потребление ресурсов
+# и большой счет от облачного провайдера.
+
+# 2) Нагрузка на поды
+# 4 пода справляются с пиковой нагрузкой, 
+# которая приходится на дневное время.
+# Ночью же будет достачно и 3ех подов, 
+# развернутых в разных зонах кластера.
+# Наиболее универсальным решением будет 
+# использование отдельного манифеста HPA, который создает
+# или уничтожает поды в зависимости от нагрузки на кластер.
+
+# 3) Монитроинг контейнеров
+# Для монитроинга состояния подов пропишем HealthCheaker,
+# учитывающий максимальные 10 сек для инициализации.
+
+# 4) Потребляемые ресурсы
+# Разворачивать приложение будем с requests на 0.1 CPU и 128 Mb. 
+# Limits по Memory будет постоянным в 256 Мb, по CPU 1.
+
+### Полученный манифест(Web-Server nginx)######
+
+apiVersion: app/v1 
+kind: Deployment
+metadata:
+  name: nginx-front
+spec:
+  # изначально развернем 3 реплики в каждой зоне
+  replicas: 3
+
+  # Каждый под данного Deployment
+  # получает метку app: nginx-front
+  selector:
+    matchLabels:
+      app: nginx-front
+  template:
+    metadata:
+      labels:
+        app: nginx-front
+    spec:
+    # С помощью podAntiAffinity задаем, что в одной зоне
+    # желателен  только один под nginx. Sheduler будет стараться избегать 
+    # размещать под на узле с меткой зоны topology.kubernetes.io/zone,
+    # если в этой зоне запущен хотя бы один под с меткой app: nginx-front
+      affinity:
+        podAntiAffinity:
+          # используем "мягкое" правило размещения, так как зоны всего три,
+          # а подов может понадобиться 4ре;
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - nginx-front
+              topologyKey: "topology.kubernetes.io/zone"
+    
+    # скачиваем образ контейнера 
+      containers:
+        - name: nginx 
+          image: registry.company.ru/nginx:1.14.2
+    # requests установим из условия базовой нагрузки
+          resources:
+            requests:
+              memory: 128M
+              cpu: 100m
+    # limits установим из условия возможного скачка нагрузки по CPU
+            limits:
+              memory: 256M
+              cpu: "1"
+    # nginx по умолчанию работает на 80ом порту
+          ports:
+          - containerPort: 80
+    # проверка жизнеспособности контейнера:
+    # 10 сек на инициализацию, потом TCP соединение через каждые 5 сек
+          livenessProbe: 
+          # работоспособность проверяем на большом промежутке времени
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+          # готовность на принятие трафика проверяем малом промежутке времени
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 5
+
+# Создадим HorizontalPodAutoscaler, который увеличит
+# количество подов при росте нагузки на систему.
+
+  apiVersion: autoscaling/v1
+  kind: HorizontalPodAutoscaler
+  metadata:
+    name: hpa-for-nginx
+  # задаем объект слежения
+  spec:
+    scaleTargetRef:
+      apiVersion: app/v1
+      kind: Deployment
+      name: nginx-front
+    # для отказоустойчивости изначально требуется 3 реплики
+    minReplicas: 3
+    # По результатам нагрузочного теста установлено, что 4ех подов
+    # достаточно для обработки пиковой нагрузки
+    maxReplicas: 4
+    # новая реплика создается при повышении нагрузки
+    # на процессор или оперативную память
+    metrics:
+    - type: Resource
+      resource:
+        name: cpu
+# Примем граничным зачение выше стандартного 0.1 CPU в два раза
+        targetAverageValue: 200mi
+    - type: Resource
+      resource:
+        name: memory
+        # Граничное значение по памяти
+        targetAverageValue: 200Mi
