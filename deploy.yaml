@@ -76,11 +76,11 @@ spec:
     # requests установим из условия базовой нагрузки
           resources:
             requests:
-              memory: 128M
-              cpu: 100m
+              memory: "128Mi"
+              cpu: "100m"
     # limits установим из условия возможного скачка нагрузки по CPU
             limits:
-              memory: 256M
+              memory: "256Mi"
               cpu: "1"
     # nginx по умолчанию работает на 80ом порту
           ports:
@@ -125,9 +125,9 @@ spec:
       resource:
         name: cpu
 # Примем граничным зачение выше стандартного 0.1 CPU в два раза
-        targetAverageValue: 200mi
+        targetAverageValue: "200m"
     - type: Resource
       resource:
         name: memory
         # Граничное значение по памяти
-        targetAverageValue: 200Mi
+        targetAverageValue: "200Mi"
